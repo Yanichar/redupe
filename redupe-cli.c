@@ -246,29 +246,18 @@ correct_file(const char* file)
     return x;
 }
 
-#define STRLENOF(x)  (sizeof(x)-1)
-#define REDUPE "redupe"
-#define REUNDUPE "reundupe"
-
 int
 main(int argc, const char* argv[])
 {
     int rc;
-    int correct = 0;
 
-    if (strcmp(argv[0] + strlen(argv[0]) - STRLENOF(REDUPE), REDUPE) == 0)
-    {
-        correct = 0;
-    }
-
-    if (strcmp(argv[0] + strlen(argv[0]) - STRLENOF(REUNDUPE), REUNDUPE) == 0)
-    {
-        correct = 1;
-    }
-
+    int encode = 0;
+    int decode = 0;
     double overhead = 12.549;
     struct poptOption redupe_args[] = {
         POPT_AUTOHELP
+        {"encode", 'e', POPT_ARG_NONE, &encode, 0, "Encode file or stream", ""},
+        {"decode", 'd', POPT_ARG_NONE, &decode, 0, "Decode file or stream", ""},
         {"overhead", 'o', POPT_ARG_DOUBLE, &overhead, 0, "overhead as a % (default 12.5%)", "0-100"},
         POPT_TABLEEND
     };
@@ -303,6 +292,19 @@ main(int argc, const char* argv[])
         }
     }
 
+    if (!(encode || decode))
+    {
+        fprintf(stderr, "encode or decode operation must be specified\n");
+        poptPrintUsage(ctx, stderr, 0);
+        return EXIT_FAILURE;
+    }
+    if (encode && decode)
+    {
+        fprintf(stderr, "Only encode or decode operation must be specified, not both\n");
+        poptPrintUsage(ctx, stderr, 0);
+        return EXIT_FAILURE;
+    }
+
     if (overhead < 1 || overhead >= 95)
     {
         fprintf(stderr, "overhead %% must be in the range [1, 95)\n");
@@ -324,7 +326,7 @@ main(int argc, const char* argv[])
 
     if (!args || !*args)
     {
-        if (correct)
+        if (decode)
         {
             struct redupe_correct_file* input = redupe_correct_from_file(stdin);
 
@@ -371,7 +373,7 @@ main(int argc, const char* argv[])
         {
             int x = 0;
 
-            if (correct)
+            if (decode)
             {
                 x = correct_file(*args);
             }
