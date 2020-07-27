@@ -689,24 +689,24 @@ parse_header(const unsigned char* buf,
 }
 
 void
-scatter(unsigned char chunk[CHUNK_SIZE], const unsigned char encoded[255], unsigned idx)
+scatter(unsigned char *chunk, int64_t chunk_size, unsigned idx, const unsigned char encoded[255], int64_t block_size)
 {
-    assert(idx < BLOCK_SIZE);
+    assert(idx < block_size);
 
     for (unsigned i = 0; i < 255; ++i)
     {
-        chunk[BLOCK_SIZE * i + idx] = encoded[i];
+        chunk[block_size * i + idx] = encoded[i];
     }
 }
 
 void
-gather(const unsigned char chunk[CHUNK_SIZE], unsigned char encoded[255], unsigned idx)
+gather(const unsigned char *chunk, unsigned char encoded[255], unsigned idx, int64_t block_size)
 {
-    assert(idx < BLOCK_SIZE);
+    assert(idx < block_size);
 
     for (unsigned i = 0; i < 255; ++i)
     {
-        encoded[i] = chunk[BLOCK_SIZE * i + idx];
+        encoded[i] = chunk[block_size * i + idx];
     }
 }
 
@@ -717,12 +717,13 @@ struct redupe_encode_file
     unsigned chunk_idx;
     unsigned chunk_amt;
     unsigned buf_sz;
-    unsigned char chunk[CHUNK_SIZE];
+    u_int64_t chunk_size;
+    unsigned char * chunk;
     unsigned char buf[255];
 };
 
-REDUPE_API struct redupe_encode_file*
-redupe_encode_open(const char* path, unsigned nsym)
+REDUPE_API struct redupe_encode_file *
+redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size)
 {
     FILE* out = fopen(path, "w");
 
@@ -731,7 +732,7 @@ redupe_encode_open(const char* path, unsigned nsym)
         return NULL;
     }
 
-    struct redupe_encode_file* ret = redupe_encode_from_file(out, nsym);
+    struct redupe_encode_file* ret = redupe_encode_from_file(out, nsym, chunk_size);
 
     if (!ret)
     {
@@ -743,7 +744,7 @@ redupe_encode_open(const char* path, unsigned nsym)
 }
 
 REDUPE_API struct redupe_encode_file*
-redupe_encode_from_file(FILE* out, unsigned nsym)
+redupe_encode_from_file(FILE* out, unsigned nsym, int64_t block_size)
 {
     struct redupe_encode_file* ret = malloc(sizeof(struct redupe_encode_file));
 
@@ -758,11 +759,20 @@ redupe_encode_from_file(FILE* out, unsigned nsym)
     ret->chunk_idx = 0;
     ret->chunk_amt = 0;
     ret->buf_sz = 0;
+    ret->chunk_size = block_size * 255;
+
+    ret->chunk = malloc(ret->chunk_size);
+    if(!ret->chunk)
+    {
+        free(ret);
+        return NULL;
+    }
+
     return ret;
 }
 
 REDUPE_API ssize_t
-redupe_encode_write(struct redupe_encode_file* out, const unsigned char* buf, size_t buf_sz)
+redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, size_t buf_sz, int64_t block_size)
 {
     const unsigned msg_sz = 255 - out->nsym;
     ssize_t written = 0;
@@ -785,13 +795,13 @@ redupe_encode_write(struct redupe_encode_file* out, const unsigned char* buf, si
         }
 
         redupe_encode_msg(out->buf, msg_sz, out->nsym, out->buf + msg_sz);
-        scatter(out->chunk, out->buf, out->chunk_idx);
+        scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
         ++out->chunk_idx;
         out->chunk_amt += msg_sz;
         out->buf_sz = 0;
         memset(out->buf, 0, sizeof(out->buf));
 
-        if (out->chunk_idx + 1 < BLOCK_SIZE)
+        if (out->chunk_idx + 1 < block_size)
         {
             continue;
         }
@@ -800,42 +810,42 @@ redupe_encode_write(struct redupe_encode_file* out, const unsigned char* buf, si
         memset(header, 0, sizeof(header));
         create_header(out->chunk_amt, msg_sz, out->nsym, header);
         redupe_encode_msg(header, HEADER_SIZE, 255 - HEADER_SIZE, header + HEADER_SIZE);
-        scatter(out->chunk, header, BLOCK_SIZE - 1);
+        scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
 
-        if (fwrite(out->chunk, 1, CHUNK_SIZE, out->out) != CHUNK_SIZE)
+        if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
         {
             return -1;
         }
 
         out->chunk_idx = 0;
         out->chunk_amt = 0;
-        memset(out->chunk, 0, sizeof(out->chunk));
+        memset(out->chunk, 0, out->chunk_size);
     }
 
     return written;
 }
 
 REDUPE_API int
-redupe_encode_close(struct redupe_encode_file* out)
+redupe_encode_close(struct redupe_encode_file *out, int64_t block_size)
 {
     const unsigned msg_sz = 255 - out->nsym;
     memset(out->buf + out->buf_sz, 0, 255 - out->buf_sz);
     redupe_encode_msg(out->buf, out->buf_sz, out->nsym, out->buf + msg_sz);
-    scatter(out->chunk, out->buf, out->chunk_idx);
+    scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
     unsigned char header[256];
     memset(header, 0, sizeof(header));
 
-    for (unsigned i = out->chunk_idx + 1; i < BLOCK_SIZE; ++i)
+    for (unsigned i = out->chunk_idx + 1; i < block_size; ++i)
     {
-        scatter(out->chunk, header, i);
+        scatter(out->chunk, out->chunk_size, i, header, block_size);
     }
 
     create_header(out->chunk_amt + out->buf_sz, msg_sz, out->nsym, header);
     redupe_encode_msg(header, HEADER_SIZE, 255 - HEADER_SIZE, header + HEADER_SIZE);
-    scatter(out->chunk, header, BLOCK_SIZE - 1);
+    scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
     int ret = 0;
 
-    if (fwrite(out->chunk, 1, CHUNK_SIZE, out->out) != CHUNK_SIZE)
+    if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
     {
         ret = -1;
     }
@@ -857,11 +867,12 @@ struct redupe_correct_file
     unsigned chunk_idx;
     unsigned chunk_amt;
     unsigned offset;
-    unsigned char chunk[CHUNK_SIZE];
+    int64_t chunk_size;
+    unsigned char * chunk;
 };
 
-REDUPE_API struct redupe_correct_file*
-redupe_correct_open(const char* path)
+REDUPE_API struct redupe_correct_file *
+redupe_correct_open(const char *path, int64_t block_size)
 {
     FILE* in = fopen(path, "r");
 
@@ -870,7 +881,7 @@ redupe_correct_open(const char* path)
         return NULL;
     }
 
-    struct redupe_correct_file* ret = redupe_correct_from_file(in);
+    struct redupe_correct_file* ret = redupe_correct_from_file(in, block_size);
 
     if (!ret)
     {
@@ -881,8 +892,8 @@ redupe_correct_open(const char* path)
     return ret;
 }
 
-REDUPE_API struct redupe_correct_file*
-redupe_correct_from_file(FILE* in)
+REDUPE_API struct redupe_correct_file *
+redupe_correct_from_file(FILE *in, int64_t block_size)
 {
     struct redupe_correct_file* ret = malloc(sizeof(struct redupe_correct_file));
 
@@ -895,28 +906,36 @@ redupe_correct_from_file(FILE* in)
     ret->in = in;
     ret->msg_sz = 0;
     ret->code_sz = 0;
-    ret->chunk_idx = BLOCK_SIZE - 1;
-    ret->chunk_amt = CHUNK_SIZE;
+    ret->chunk_idx = block_size - 1;
+    ret->chunk_amt = block_size * 255;
+    ret->chunk_size = block_size * 255;
+    ret->chunk = malloc(ret->chunk_size);
+    if(!ret->chunk)
+    {
+        free(ret);
+        return NULL;
+    }
+
     return ret;
 }
 
 REDUPE_API ssize_t
-redupe_correct_read(struct redupe_correct_file* in, unsigned char* buf, size_t buf_sz)
+redupe_correct_read(struct redupe_correct_file *in, unsigned char *buf, size_t buf_sz, int64_t block_size)
 {
     ssize_t amt = 0;
 
     while (buf_sz > 0)
     {
-        if (in->chunk_idx == BLOCK_SIZE - 1)
+        if (in->chunk_idx == block_size - 1)
         {
-            size_t x = fread(in->chunk, 1, CHUNK_SIZE, in->in);
+            size_t x = fread(in->chunk, 1, in->chunk_size, in->in);
 
             if (x == 0)
             {
                 break;
             }
 
-            if (x != CHUNK_SIZE || ferror(in->in))
+            if (x != in->chunk_size || ferror(in->in))
             {
                 return -1;
             }
@@ -924,7 +943,7 @@ redupe_correct_read(struct redupe_correct_file* in, unsigned char* buf, size_t b
             in->chunk_idx = 0;
             in->offset = 0;
             unsigned char header[256];
-            gather(in->chunk, header, BLOCK_SIZE - 1);
+            gather(in->chunk, header, block_size - 1, block_size);
             unsigned long long chunk_amt;
             parse_header(header, &chunk_amt, &in->msg_sz, &in->code_sz);
             in->chunk_amt = chunk_amt;
@@ -946,7 +965,7 @@ redupe_correct_read(struct redupe_correct_file* in, unsigned char* buf, size_t b
         }
 
         unsigned char tmp[256];
-        gather(in->chunk, tmp, in->chunk_idx);
+        gather(in->chunk, tmp, in->chunk_idx, block_size);
         const unsigned this_msg_sz = chunk_start + in->msg_sz <= in->chunk_amt ? in->msg_sz : in->chunk_amt - chunk_start;
 
         if (redupe_correct_msg(tmp, this_msg_sz, in->code_sz, tmp + in->msg_sz) < 0)
@@ -1010,7 +1029,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         return -1;
     }
 
-    struct redupe_encode_file* output = redupe_encode_open(fec, nsym);
+    struct redupe_encode_file* output = redupe_encode_open(fec, nsym, 0);
 
     if (!output)
     {
@@ -1024,7 +1043,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         unsigned char header[HEADER_SIZE];
         create_header(start_stat.st_size, msg_sz, code_sz, header);
 
-        if (redupe_encode_write(output, header, HEADER_SIZE) != HEADER_SIZE)
+        if (redupe_encode_write(output, header, HEADER_SIZE, 0) != HEADER_SIZE)
         {
             ret = -1;
         }
@@ -1052,7 +1071,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
 
         for (unsigned i = 0; ret == 0 && i < BLOCK_SIZE; ++i)
         {
-            gather(inbuf, outbuf + outbuf_sz, i);
+            gather(inbuf, outbuf + outbuf_sz, i, 0);
             outbuf_sz += 255;
 
             while (outbuf_sz >= msg_sz || (i + 1 == BLOCK_SIZE && outbuf_sz > 0))
@@ -1062,7 +1081,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
                 memset(code, 0, sizeof(code));
                 redupe_encode_msg(outbuf, sz, code_sz, code);
 
-                if (redupe_encode_write(output, code, code_sz) != code_sz)
+                if (redupe_encode_write(output, code, code_sz, 0) != code_sz)
                 {
                     ret = -1;
                     break;
@@ -1093,7 +1112,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         ret = -1;
     }
 
-    if (redupe_encode_close(output) < 0)
+    if (redupe_encode_close(output, 0) < 0)
     {
         ret = -1;
     }
@@ -1126,7 +1145,7 @@ fecsum_correct(const char* file, const char* fec, const char* corrected)
         return -1;
     }
 
-    struct redupe_correct_file* fecsum = redupe_correct_open(fec);
+    struct redupe_correct_file* fecsum = redupe_correct_open(fec, 0);
 
     if (!fecsum)
     {
@@ -1142,7 +1161,7 @@ fecsum_correct(const char* file, const char* fec, const char* corrected)
     {
         unsigned char header[HEADER_SIZE];
 
-        if (redupe_correct_read(fecsum, header, HEADER_SIZE) != HEADER_SIZE)
+        if (redupe_correct_read(fecsum, header, HEADER_SIZE, 0) != HEADER_SIZE)
         {
             goto fecsum_correct_error;
         }
@@ -1182,7 +1201,7 @@ fecsum_correct(const char* file, const char* fec, const char* corrected)
 
         for (unsigned i = 0; i < BLOCK_SIZE; ++i)
         {
-            gather(inbuf, tmp + tmp_sz, i);
+            gather(inbuf, tmp + tmp_sz, i, 0);
             tmp_sz += 255;
 
             while (tmp_sz >= msg_sz || (i + 1 == BLOCK_SIZE && tmp_sz > 0))
@@ -1190,7 +1209,7 @@ fecsum_correct(const char* file, const char* fec, const char* corrected)
                 const unsigned sz = tmp_sz < msg_sz ? tmp_sz : msg_sz;
                 unsigned char code[256];
 
-                if (redupe_correct_read(fecsum, code, code_sz) != code_sz)
+                if (redupe_correct_read(fecsum, code, code_sz, 0) != code_sz)
                 {
                     goto fecsum_correct_error;
                 }
@@ -1207,7 +1226,7 @@ fecsum_correct(const char* file, const char* fec, const char* corrected)
 
         for (unsigned i = 0; i < BLOCK_SIZE; ++i)
         {
-            scatter(inbuf, outbuf + i * 255, i);
+            scatter(inbuf, 0, i, outbuf + i * 255, 0);
         }
 
         if (fwrite(inbuf, 1, amt, output) != amt)

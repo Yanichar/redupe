@@ -45,7 +45,7 @@
 #define BUF_SIZE 4096
 
 static int
-encode_stream(FILE* input, struct redupe_encode_file* output)
+encode_stream(FILE *input, struct redupe_encode_file *output, int64_t block_size)
 {
     unsigned char buf[BUF_SIZE];
 
@@ -65,7 +65,7 @@ encode_stream(FILE* input, struct redupe_encode_file* output)
         }
 
         assert(amt > 0);
-        ssize_t written = redupe_encode_write(output, buf, amt);
+        ssize_t written = redupe_encode_write(output, buf, amt, block_size);
 
         if (written != (ssize_t)amt)
         {
@@ -83,7 +83,7 @@ encode_stream(FILE* input, struct redupe_encode_file* output)
 }
 
 static int
-encode_file(const char* file, unsigned code_sz)
+encode_file(const char *file, unsigned code_sz, int64_t block_size)
 {
     FILE* input = fopen(file, "r");
 
@@ -104,7 +104,7 @@ encode_file(const char* file, unsigned code_sz)
     }
 
     strcat(path, ".rd");
-    struct redupe_encode_file* output = redupe_encode_open(path, code_sz);
+    struct redupe_encode_file* output = redupe_encode_open(path, code_sz, block_size);
 
     if (!output)
     {
@@ -113,10 +113,10 @@ encode_file(const char* file, unsigned code_sz)
         return EXIT_FAILURE;
     }
 
-    int ret = encode_stream(input, output);
+    int ret = encode_stream(input, output, block_size);
     fclose(input);
 
-    if (redupe_encode_close(output) < 0)
+    if (redupe_encode_close(output, block_size) < 0)
     {
         fprintf(stderr, "could not flush output\n");
         return EXIT_FAILURE;
@@ -126,13 +126,13 @@ encode_file(const char* file, unsigned code_sz)
 }
 
 static int
-correct_stream(struct redupe_correct_file* input, FILE* output)
+correct_stream(struct redupe_correct_file *input, FILE *output, int64_t block_size)
 {
     unsigned char buf[BUF_SIZE];
 
     while (1)
     {
-        ssize_t amt = redupe_correct_read(input, buf, BUF_SIZE);
+        ssize_t amt = redupe_correct_read(input, buf, BUF_SIZE, block_size);
 
         if (amt < 0)
         {
@@ -164,7 +164,7 @@ correct_stream(struct redupe_correct_file* input, FILE* output)
 }
 
 static int
-correct_file(const char* file)
+correct_file(const char *file, int64_t block_size)
 {
     size_t file_sz = strlen(file);
 
@@ -206,7 +206,7 @@ correct_file(const char* file)
         return EXIT_FAILURE;
     }
 
-    struct redupe_correct_file* input = redupe_correct_open(file);
+    struct redupe_correct_file* input = redupe_correct_open(file, block_size);
 
     if (!input)
     {
@@ -225,7 +225,7 @@ correct_file(const char* file)
         return EXIT_FAILURE;
     }
 
-    int x = correct_stream(input, tmp);
+    int x = correct_stream(input, tmp, block_size);
     redupe_correct_close(input);
     fclose(tmp);
 
@@ -246,6 +246,42 @@ correct_file(const char* file)
     return x;
 }
 
+int64_t parce_block_size(char * input)
+{
+    int64_t block_size = 0;
+
+    // @todo: consider to implement some %s limit during reading
+
+    char * multiplier = malloc(sizeof(char) * strlen(input));
+    sscanf(input,"%ld%s", &block_size, multiplier);
+    int mul = 1;
+
+    if (!strcmp(multiplier, "M"))
+    {
+        mul = 1024;
+    }
+    else if(!strcmp(multiplier, "MB"))
+    {
+        mul = 1000;
+    }
+    else if(!strcmp(multiplier, "G"))
+    {
+        mul =  1024 * 1024;
+    }
+    else if(!strcmp(multiplier, "GB"))
+    {
+        mul =  1000 * 1000;
+    }
+    else if (strlen(multiplier))
+    {
+        // error: only no multiplier or Mx or Gx is allowed
+        free(multiplier);
+        return -1;
+    }
+    free(multiplier);
+    return block_size * mul;
+}
+
 int
 main(int argc, const char* argv[])
 {
@@ -253,11 +289,16 @@ main(int argc, const char* argv[])
 
     int encode = 0;
     int decode = 0;
+    char * block_size_str = NULL;
+    int64_t block_size = 4096*255;
     double overhead = 12.549;
     struct poptOption redupe_args[] = {
         POPT_AUTOHELP
         {"encode", 'e', POPT_ARG_NONE, &encode, 0, "Encode file or stream", ""},
         {"decode", 'd', POPT_ARG_NONE, &decode, 0, "Decode file or stream", ""},
+        {"block-size", 'b', POPT_ARG_STRING, &block_size_str, 0, \
+            "Block size may be followed by the following multiplicative suffixes: M=1000, MB=1024, "
+            "G=1000*1000, GB=1024*1024 (default 1 044 480 bytes)", ""},
         {"overhead", 'o', POPT_ARG_DOUBLE, &overhead, 0, "overhead as a % (default 12.5%)", "0-100"},
         POPT_TABLEEND
     };
@@ -312,6 +353,20 @@ main(int argc, const char* argv[])
         return EXIT_FAILURE;
     }
 
+    if (block_size_str)
+    {
+        block_size = parce_block_size(block_size_str);
+
+        if (block_size < 0)
+        {
+            fprintf(stderr, "Only non-multiplier or Mx or Gx is allowed\n");
+            poptPrintUsage(ctx, stderr, 0);
+            return EXIT_FAILURE;
+        }
+    }
+
+    block_size = ceil((double)block_size / 255);
+
     unsigned code_sz = 32;
     unsigned msg_sz = 223;
     code_sz = ceil(2.55 * overhead);
@@ -328,7 +383,7 @@ main(int argc, const char* argv[])
     {
         if (decode)
         {
-            struct redupe_correct_file* input = redupe_correct_from_file(stdin);
+            struct redupe_correct_file* input = redupe_correct_from_file(stdin, block_size);
 
             if (!input)
             {
@@ -337,7 +392,7 @@ main(int argc, const char* argv[])
             }
             else
             {
-                ret = correct_stream(input, stdout);
+                ret = correct_stream(input, stdout, block_size);
 
                 if (redupe_correct_close(input) < 0)
                 {
@@ -348,7 +403,7 @@ main(int argc, const char* argv[])
         }
         else
         {
-            struct redupe_encode_file* output = redupe_encode_from_file(stdout, code_sz);
+            struct redupe_encode_file* output = redupe_encode_from_file(stdout, code_sz, block_size);
 
             if (!output)
             {
@@ -357,9 +412,9 @@ main(int argc, const char* argv[])
             }
             else
             {
-                ret = encode_stream(stdin, output);
+                ret = encode_stream(stdin, output, block_size);
 
-                if (redupe_encode_close(output) < 0)
+                if (redupe_encode_close(output, block_size) < 0)
                 {
                     fprintf(stderr, "error reading output\n");
                     ret = EXIT_FAILURE;
@@ -375,11 +430,11 @@ main(int argc, const char* argv[])
 
             if (decode)
             {
-                x = correct_file(*args);
+                x = correct_file(*args, block_size);
             }
             else
             {
-                x = encode_file(*args, code_sz);
+                x = encode_file(*args, code_sz, block_size);
             }
 
             if (x != EXIT_SUCCESS && ret == EXIT_SUCCESS)
