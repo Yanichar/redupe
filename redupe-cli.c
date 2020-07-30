@@ -258,19 +258,19 @@ int64_t parce_block_size(char * input)
 
     if (!strcmp(multiplier, "M"))
     {
-        mul = 1024;
+        mul = 1024*1024;
     }
     else if(!strcmp(multiplier, "MB"))
     {
-        mul = 1000;
+        mul = 1000*1000;
     }
     else if(!strcmp(multiplier, "G"))
     {
-        mul =  1024 * 1024;
+        mul =  1024 * 1024 * 1024;
     }
     else if(!strcmp(multiplier, "GB"))
     {
-        mul =  1000 * 1000;
+        mul =  1000 * 1000 * 1000;
     }
     else if (strlen(multiplier))
     {
