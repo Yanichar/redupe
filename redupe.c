@@ -651,6 +651,9 @@ redupe_correct_msg(unsigned char* msg, unsigned msg_sz,
 #define CHUNK_SIZE (255 * BLOCK_SIZE)
 #define HEADER_SIZE 16
 
+#define SCATTER_BUFFER 1
+#define SCATTER_BUFFER_SIZE 255 // (SCATTER_BUFFER * 255)
+
 void
 create_header(unsigned long long amt,
               unsigned msg_sz,
@@ -688,6 +691,96 @@ parse_header(const unsigned char* buf,
     *code_sz = buf[9];
 }
 
+typedef struct
+{
+    int64_t chunk_position;
+    unsigned idx;
+    unsigned char encoded[255];
+}chunk_t;
+
+void
+file_scatter(int64_t chunk_position, unsigned idx, const unsigned char encoded[255], int64_t block_size, FILE *fp,
+             char flush)
+{
+/*
+    static char scateer_buffer[SCATTER_BUFFER_SIZE][255];
+    static int64_t current_buffer_pointer = 0;
+    static int64_t buffer_counter;
+
+    for (unsigned i = 0; i < 255; ++i)
+    {
+        scateer_buffer[++current_buffer_pointer][i] = encoded[i];
+        // fseek(fp, (u_int64_t)block_size * i + idx + chunk_position, SEEK_SET);
+        fwrite(&encoded[i], sizeof(char), 1, fp);
+    }
+
+    if(current_buffer_pointer == SCATTER_BUFFER_SIZE)
+    {
+        current_buffer_pointer = 0;
+        ++buffer_counter;
+    }
+*/
+
+    static int64_t temp = 0;
+    temp += 255;
+
+    // printf("%li \r\n", temp);
+    // fseek is relativly expencive operation, so we need some buffer before write
+    static chunk_t buffer[SCATTER_BUFFER_SIZE];
+
+    // @todo: rename me!!!
+    static buffer2[SCATTER_BUFFER_SIZE];
+
+    static int buffer_count = 0;
+
+    // @todo: consider to split it for functions
+    // add to buffer
+    if (buffer_count < SCATTER_BUFFER_SIZE)
+    {
+        chunk_t new_element = { chunk_position, idx };
+        memcpy(&new_element.encoded[0], &encoded[0], 255);
+        buffer[buffer_count++] = new_element;
+    }
+
+    // flush procedure
+    if (buffer_count  ==  SCATTER_BUFFER_SIZE || flush)
+    {
+        //printf("Flush, %i %i \r\n", flush, buffer_count);
+        for (int i = 0; i < 255; i++)
+        {
+            int64_t position = (int64_t)block_size * i + buffer[0].idx + chunk_position;
+            // int64_t position = (u_int64_t)block_size * i + chunk_position;
+
+            // @todo: it wil outdated when block_count>1
+            assert(position < block_size * 255);
+
+            for (int b = 0; b < SCATTER_BUFFER_SIZE; b++)
+            {
+                buffer2[b] = buffer[b].encoded[i];
+            }
+
+            fseek(fp, position, SEEK_SET);
+
+            // printf("write, %i %i \r\n", buffer_count, position);
+            fwrite(&buffer2[0], sizeof(char), SCATTER_BUFFER_SIZE, fp);
+        }
+        buffer_count = 0;
+    }
+
+  /*  assert(idx < block_size);
+
+    printf("%f\r\n", (double)idx/(double)block_size);
+    printf((u_int64_t)block_size * i + idx + chunk_position);
+*/
+
+/*
+    for (unsigned i = 0; i < 255; ++i)
+    {
+        fseek(fp, (u_int64_t)block_size * i + idx + chunk_position, SEEK_SET);
+        fwrite(&encoded[i], sizeof(char), 1, fp);
+    }*/
+}
+
 void
 scatter(unsigned char *chunk, int64_t chunk_size, unsigned idx, const unsigned char encoded[255], int64_t block_size)
 {
@@ -723,7 +816,7 @@ struct redupe_encode_file
 };
 
 REDUPE_API struct redupe_encode_file *
-redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size)
+redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size, int direct_mode)
 {
     FILE* out = fopen(path, "w");
 
@@ -732,7 +825,7 @@ redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size)
         return NULL;
     }
 
-    struct redupe_encode_file* ret = redupe_encode_from_file(out, nsym, chunk_size);
+    struct redupe_encode_file* ret = redupe_encode_from_file(out, nsym, chunk_size, direct_mode);
 
     if (!ret)
     {
@@ -743,8 +836,8 @@ redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size)
     return ret;
 }
 
-REDUPE_API struct redupe_encode_file*
-redupe_encode_from_file(FILE* out, unsigned nsym, int64_t block_size)
+REDUPE_API struct redupe_encode_file *
+redupe_encode_from_file(FILE *out, unsigned nsym, int64_t block_size, int direct_mode)
 {
     struct redupe_encode_file* ret = malloc(sizeof(struct redupe_encode_file));
 
@@ -759,20 +852,26 @@ redupe_encode_from_file(FILE* out, unsigned nsym, int64_t block_size)
     ret->chunk_idx = 0;
     ret->chunk_amt = 0;
     ret->buf_sz = 0;
-    ret->chunk_size = block_size * 255;
 
-    ret->chunk = malloc(ret->chunk_size);
-    if(!ret->chunk)
+    // in direct mode we dont use chunk in memory
+    // instead we use direct writing to file
+    if(!direct_mode)
     {
-        free(ret);
-        return NULL;
+        ret->chunk_size = block_size * 255;
+        ret->chunk = malloc(ret->chunk_size);
+        if(!ret->chunk)
+        {
+            free(ret);
+            return NULL;
+        }
     }
 
     return ret;
 }
 
 REDUPE_API ssize_t
-redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, size_t buf_sz, int64_t block_size)
+redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, size_t buf_sz, int64_t block_size,
+                    int direct_mode)
 {
     const unsigned msg_sz = 255 - out->nsym;
     ssize_t written = 0;
@@ -795,7 +894,13 @@ redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, si
         }
 
         redupe_encode_msg(out->buf, msg_sz, out->nsym, out->buf + msg_sz);
-        scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
+        if (!direct_mode)
+        {
+            scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
+        } else
+        {
+            file_scatter(0, out->chunk_idx, out->buf, block_size, out->out, 0);
+        }
         ++out->chunk_idx;
         out->chunk_amt += msg_sz;
         out->buf_sz = 0;
@@ -810,11 +915,19 @@ redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, si
         memset(header, 0, sizeof(header));
         create_header(out->chunk_amt, msg_sz, out->nsym, header);
         redupe_encode_msg(header, HEADER_SIZE, 255 - HEADER_SIZE, header + HEADER_SIZE);
-        scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
-
-        if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
+        if (!direct_mode)
         {
-            return -1;
+            scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
+
+            if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
+            {
+                return -1;
+            }
+        } else
+        {
+            file_scatter(0, block_size - 1, header, block_size, out->out, 0);
+
+            // no need to write to file because file_scaterr already writes to it
         }
 
         out->chunk_idx = 0;
@@ -826,28 +939,49 @@ redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, si
 }
 
 REDUPE_API int
-redupe_encode_close(struct redupe_encode_file *out, int64_t block_size)
+redupe_encode_close(struct redupe_encode_file *out, int64_t block_size, int direct_mode)
 {
+    int ret = 0;
     const unsigned msg_sz = 255 - out->nsym;
     memset(out->buf + out->buf_sz, 0, 255 - out->buf_sz);
     redupe_encode_msg(out->buf, out->buf_sz, out->nsym, out->buf + msg_sz);
-    scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
+    if (!direct_mode)
+    {
+        scatter(out->chunk, out->chunk_size, out->chunk_idx, out->buf, block_size);
+    } else
+    {
+        file_scatter(0, out->chunk_idx, out->buf, block_size, out->out, 0);
+    }
+
     unsigned char header[256];
     memset(header, 0, sizeof(header));
 
     for (unsigned i = out->chunk_idx + 1; i < block_size; ++i)
     {
-        scatter(out->chunk, out->chunk_size, i, header, block_size);
+        if (!direct_mode)
+        {
+            scatter(out->chunk, out->chunk_size, i, header, block_size);
+        } else
+        {
+            file_scatter(0, i, header, block_size, out->out, 0);
+        }
     }
 
     create_header(out->chunk_amt + out->buf_sz, msg_sz, out->nsym, header);
     redupe_encode_msg(header, HEADER_SIZE, 255 - HEADER_SIZE, header + HEADER_SIZE);
-    scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
-    int ret = 0;
-
-    if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
+    if (!direct_mode)
     {
-        ret = -1;
+        scatter(out->chunk, out->chunk_size, block_size - 1, header, block_size);
+        if (fwrite(out->chunk, 1, out->chunk_size, out->out) != out->chunk_size)
+        {
+            ret = -1;
+        }
+    } else
+    {
+        // @ todo: chunk position still 0 in any mode
+        file_scatter(0, block_size - 1, header, block_size, out->out, 1);
+
+        // no need to write to file because file_scatter writes to it already
     }
 
     if (fclose(out->out) == EOF)
@@ -1029,7 +1163,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         return -1;
     }
 
-    struct redupe_encode_file* output = redupe_encode_open(fec, nsym, 0);
+    struct redupe_encode_file* output = redupe_encode_open(fec, nsym, 0, 0);
 
     if (!output)
     {
@@ -1043,7 +1177,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         unsigned char header[HEADER_SIZE];
         create_header(start_stat.st_size, msg_sz, code_sz, header);
 
-        if (redupe_encode_write(output, header, HEADER_SIZE, 0) != HEADER_SIZE)
+        if (redupe_encode_write(output, header, HEADER_SIZE, 0, 0) != HEADER_SIZE)
         {
             ret = -1;
         }
@@ -1081,7 +1215,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
                 memset(code, 0, sizeof(code));
                 redupe_encode_msg(outbuf, sz, code_sz, code);
 
-                if (redupe_encode_write(output, code, code_sz, 0) != code_sz)
+                if (redupe_encode_write(output, code, code_sz, 0, 0) != code_sz)
                 {
                     ret = -1;
                     break;
@@ -1112,7 +1246,7 @@ fecsum_create(const char* file, const char* fec, unsigned nsym)
         ret = -1;
     }
 
-    if (redupe_encode_close(output, 0) < 0)
+    if (redupe_encode_close(output, 0, 0) < 0)
     {
         ret = -1;
     }

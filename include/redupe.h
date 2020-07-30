@@ -39,11 +39,12 @@ extern "C"
 
 /* streaming in-line forward error correction */
 struct redupe_encode_file;
-struct redupe_encode_file *redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size);
-struct redupe_encode_file* redupe_encode_from_file(FILE *out, unsigned nsym, int64_t block_size);
+struct redupe_encode_file *redupe_encode_open(const char *path, unsigned nsym, int64_t chunk_size, int direct_mode);
+struct redupe_encode_file *redupe_encode_from_file(FILE *out, unsigned nsym, int64_t block_size, int direct_mode);
 ssize_t
-redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, size_t buf_sz, int64_t block_size);
-int redupe_encode_close(struct redupe_encode_file *out, int64_t block_size);
+redupe_encode_write(struct redupe_encode_file *out, const unsigned char *buf, size_t buf_sz, int64_t block_size,
+                    int direct_mode);
+int redupe_encode_close(struct redupe_encode_file *out, int64_t block_size, int direct_mode);
 
 struct redupe_correct_file;
 struct redupe_correct_file *redupe_correct_open(const char *path, int64_t block_size);

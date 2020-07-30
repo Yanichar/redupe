@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/sysinfo.h>
 
 /* popt */
 #include <popt.h>
@@ -45,7 +46,7 @@
 #define BUF_SIZE 4096
 
 static int
-encode_stream(FILE *input, struct redupe_encode_file *output, int64_t block_size)
+encode_stream(FILE *input, struct redupe_encode_file *output, int64_t block_size, int direct_mode)
 {
     unsigned char buf[BUF_SIZE];
 
@@ -65,7 +66,7 @@ encode_stream(FILE *input, struct redupe_encode_file *output, int64_t block_size
         }
 
         assert(amt > 0);
-        ssize_t written = redupe_encode_write(output, buf, amt, block_size);
+        ssize_t written = redupe_encode_write(output, buf, amt, block_size, direct_mode);
 
         if (written != (ssize_t)amt)
         {
@@ -83,7 +84,7 @@ encode_stream(FILE *input, struct redupe_encode_file *output, int64_t block_size
 }
 
 static int
-encode_file(const char *file, unsigned code_sz, int64_t block_size)
+encode_file(const char *file, unsigned code_sz, int64_t block_size, int direct_mode)
 {
     FILE* input = fopen(file, "r");
 
@@ -104,7 +105,7 @@ encode_file(const char *file, unsigned code_sz, int64_t block_size)
     }
 
     strcat(path, ".rd");
-    struct redupe_encode_file* output = redupe_encode_open(path, code_sz, block_size);
+    struct redupe_encode_file* output = redupe_encode_open(path, code_sz, block_size, direct_mode);
 
     if (!output)
     {
@@ -113,10 +114,10 @@ encode_file(const char *file, unsigned code_sz, int64_t block_size)
         return EXIT_FAILURE;
     }
 
-    int ret = encode_stream(input, output, block_size);
+    int ret = encode_stream(input, output, block_size, direct_mode);
     fclose(input);
 
-    if (redupe_encode_close(output, block_size) < 0)
+    if (redupe_encode_close(output, block_size, direct_mode) < 0)
     {
         fprintf(stderr, "could not flush output\n");
         return EXIT_FAILURE;
@@ -282,6 +283,16 @@ int64_t parce_block_size(char * input)
     return block_size * mul;
 }
 
+int64_t mem_avail()
+{
+    struct sysinfo info;
+
+    if (sysinfo(&info) < 0)
+        return 0;
+
+    return info.freeram;
+}
+
 int
 main(int argc, const char* argv[])
 {
@@ -365,6 +376,14 @@ main(int argc, const char* argv[])
         }
     }
 
+    int64_t free_ram = mem_avail();
+    char direct_mode = 0;
+    if (block_size > (free_ram * 0.75))
+    {
+        // force use file to file mode
+        direct_mode = 1;
+    }
+    direct_mode = 1;
     block_size = ceil((double)block_size / 255);
 
     unsigned code_sz = 32;
@@ -381,6 +400,13 @@ main(int argc, const char* argv[])
 
     if (!args || !*args)
     {
+        if (direct_mode)
+        {
+            fprintf(stderr, "ERROR: Only file mode is allowed with this block size.\n"
+                            "Specify file name or decrease block size to 75%% of free RAM\n");
+            return EXIT_FAILURE;
+        }
+
         if (decode)
         {
             struct redupe_correct_file* input = redupe_correct_from_file(stdin, block_size);
@@ -403,7 +429,7 @@ main(int argc, const char* argv[])
         }
         else
         {
-            struct redupe_encode_file* output = redupe_encode_from_file(stdout, code_sz, block_size);
+            struct redupe_encode_file* output = redupe_encode_from_file(stdout, code_sz, block_size, 0);
 
             if (!output)
             {
@@ -412,9 +438,9 @@ main(int argc, const char* argv[])
             }
             else
             {
-                ret = encode_stream(stdin, output, block_size);
+                ret = encode_stream(stdin, output, block_size, 0);
 
-                if (redupe_encode_close(output, block_size) < 0)
+                if (redupe_encode_close(output, block_size, direct_mode) < 0)
                 {
                     fprintf(stderr, "error reading output\n");
                     ret = EXIT_FAILURE;
@@ -434,7 +460,7 @@ main(int argc, const char* argv[])
             }
             else
             {
-                x = encode_file(*args, code_sz, block_size);
+                x = encode_file(*args, code_sz, block_size, direct_mode);
             }
 
             if (x != EXIT_SUCCESS && ret == EXIT_SUCCESS)
